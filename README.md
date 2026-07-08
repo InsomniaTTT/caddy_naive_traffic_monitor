@@ -70,7 +70,7 @@ This runs `xcaddy build --with github.com/caddyserver/forwardproxy=<local-path>`
    ```bash
    cat /var/log/caddy/traffic_by_user.json
    # or use the viewer:
-   ./view_stats.sh
+   ./proxy_monitor.sh
    ```
 
 ## Configuration
