@@ -1,0 +1,17 @@
+# Compiled binaries
+caddy_new
+caddy.exe
+caddy
+
+# Go build cache
+*.exe
+*.test
+*.out
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

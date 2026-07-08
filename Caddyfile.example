@@ -1,0 +1,24 @@
+# NaiveProxy Caddyfile Example
+# Per-user traffic statistics are enabled automatically when basic_auth is configured.
+
+:443, example.com {
+	tls your@email.com
+
+	forward_proxy {
+		basic_auth user1 supersecret1
+		basic_auth user2  supersecret2
+		basic_auth user3  supersecret3
+		basic_auth user4  supersecret4
+		basic_auth user5 supersecret5
+
+		hide_ip
+		hide_via
+		probe_resistance your-secret-domain.com
+
+		# Optional: custom path for traffic stats JSON (default: /var/log/caddy/traffic_by_user.json)
+		traffic_stats_path /var/log/caddy/traffic_by_user.json
+
+		# Optional: stats write interval (default: 30s)
+		traffic_stats_interval 30s
+	}
+}
