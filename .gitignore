@@ -15,3 +15,7 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Local build artifacts / private docs
+caddy_v2_new
+handoff_to_glm_v2_ratelimit.md

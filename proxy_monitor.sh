@@ -1,21 +1,65 @@
 #!/bin/bash
 # ==============================================================
-# NaiveProxy 账户监控脚本 v2
+# NaiveProxy 账户监控脚本 v3
 # 功能：
 #   1. 显示当前活跃连接（谁正连着，来自哪个IP）
-#   2. 显示每个账户本月累计流量（真实字节数）
+#   2. 显示每个账户本月累计流量（真实字节数）+ 配额占比
 #   3. 支持月度归档：每月初手动执行一次 --archive，把上月数据存档并清零重新计数
 #
 # 用法：
-#   ./proxy_monitor.sh                  查看当前状态（含本统计周期累计流量）
+#   ./proxy_monitor.sh                  查看当前状态（含本统计周期累计流量+配额占比）
 #   ./proxy_monitor.sh --archive        将当前流量数据归档（按日期存档），并清零重新开始统计
 #   ./proxy_monitor.sh --json           以JSON格式输出流量数据（供其他脚本调用）
+#
+# 配额配置：
+#   修改下方 QUOTA_MAP 中的 用户名=字节数，与 Caddyfile 中的 traffic_quota 对应。
+#   支持人类可读格式如 50GB、1TB 等。不在此列表中的用户视为不限流量。
 # ==============================================================
 
 PROXY_LOG="/var/log/caddy/proxy.log"
 TRAFFIC_JSON="/var/log/caddy/traffic_by_user.json"
 ARCHIVE_DIR="/var/log/caddy/traffic_archive"
 ACTION="${1:-status}"
+
+# ========== 配额配置（与 Caddyfile traffic_quota 对应）==========
+# 格式: "用户名=配额"，配额支持 B/KB/MB/GB/TB 后缀（不区分大小写）
+# 不在此列表中的用户 = 不限流量（显示为 ∞）
+QUOTA_MAP=(
+    "user2=50GB"
+    "user3=20GB"
+    "user4=100GB"
+    # user1 / user5 不限流量，不列出
+)
+
+# 将人类可读配额字符串转为字节数
+parse_quota() {
+    local s="${1^^}"  # 转大写
+    s="${s// /}"       # 去空格
+    local num="${s%%[BKMGT]*}"
+    local unit="${s##*[0-9]}"
+    local mult=1
+    case "$unit" in
+        TB)     mult=$((1024*1024*1024*1024)) ;;
+        GB)     mult=$((1024*1024*1024)) ;;
+        MB)     mult=$((1024*1024)) ;;
+        KB)     mult=$((1024)) ;;
+        B|"")   mult=1 ;;
+        *)      echo "-1"; return 1 ;;
+    esac
+    # 用 python3 算乘法避免 shell 溢出
+    python3 -c "print(int(float('$num') * $mult))"
+}
+
+# 构建配额字节数关联数组
+declare -A QUOTA_BYTES
+for entry in "${QUOTA_MAP[@]}"; do
+    user="${entry%=*}"
+    quota_str="${entry#*=}"
+    quota_bytes=$(parse_quota "$quota_str")
+    if [ $? -eq 0 ] && [ "$quota_bytes" != "-1" ]; then
+        QUOTA_BYTES["$user"]="$quota_bytes"
+    fi
+done
 
 fmt_bytes_py() {
 python3 -c "
@@ -167,14 +211,20 @@ PYEOF
     fi
 fi
 
-# ---------- 第二部分：本统计周期流量 ----------
+# ---------- 第二部分：本统计周期流量 + 配额占比 ----------
 echo ""
-echo "【本统计周期累计流量（真实字节数）】"
+echo "【本统计周期累计流量 + 配额占比】"
 echo "--------------------------------------------------"
 
 if [ ! -f "$TRAFFIC_JSON" ]; then
     echo "  尚未找到统计文件: $TRAFFIC_JSON"
 else
+    # 将 QUOTA_BYTES 传给 python
+    QUOTA_ENV=""
+    for user in "${!QUOTA_BYTES[@]}"; do
+        QUOTA_ENV="${QUOTA_ENV}'${user}':${QUOTA_BYTES[$user]},"
+    done
+
     python3 << PYEOF
 import json, os
 from datetime import datetime
@@ -185,6 +235,9 @@ with open("$TRAFFIC_JSON") as f:
 mtime = os.path.getmtime("$TRAFFIC_JSON")
 print(f"  (最后更新时间: {datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')})")
 print()
+
+# 配额映射（字节数），与 Caddyfile traffic_quota 对应
+quota = {${QUOTA_ENV%?}}
 
 if not data:
     print("  暂无流量数据")
@@ -199,22 +252,45 @@ else:
         else:
             return f"{b/1024**3:.2f} GB"
 
+    def pct_bar(pct, width=12):
+        """生成简易进度条"""
+        filled = int(width * pct / 100)
+        bar = '█' * filled + '░' * (width - filled)
+        return bar
+
     total = sum(data.values())
     sorted_items = sorted(data.items(), key=lambda x: -x[1])
 
-    print(f"  {'账户':<15}{'流量':<15}{'占比'}")
+    # 表头
+    print(f"  {'账户':<12}{'已用流量':<14}{'配额':<14}{'占比':<8}{'进度条'}")
+    print(f"  {'-'*12}{'-'*14}{'-'*14}{'-'*8}{'-'*14}")
+
     for user, bytes_val in sorted_items:
-        pct = (bytes_val / total * 100) if total > 0 else 0
-        print(f"  {user:<15}{fmt(bytes_val):<15}{pct:.1f}%")
-    print(f"  {'-'*45}")
-    print(f"  {'总计':<15}{fmt(total)}")
+        share_of_total = (bytes_val / total * 100) if total > 0 else 0
+        if user in quota:
+            q = quota[user]
+            pct_of_quota = (bytes_val / q * 100) if q > 0 else 0
+            pct_display = f"{pct_of_quota:.1f}%"
+            quota_display = fmt(q)
+            bar = pct_bar(min(pct_of_quota, 100))
+        else:
+            pct_display = "∞"
+            quota_display = "不限"
+            bar = "────────────"
+        print(f"  {user:<12}{fmt(bytes_val):<14}{quota_display:<14}{pct_display:<8}{bar}")
+
+    print(f"  {'-'*12}{'-'*14}{'-'*14}{'-'*8}{'-'*14}")
+    print(f"  {'总计':<12}{fmt(total)}")
 PYEOF
 fi
 
 echo ""
 echo "=================================================="
 echo "说明："
-echo "  - 这是【累计流量】，从上次重置(或服务首次启动)到现在的总和"
-echo "  - 重启 caddy 进程不会清零，因为会自动从JSON文件恢复历史值"
-echo "  - 想要按月归档+重新计数，使用: ./proxy_monitor.sh --archive"
+echo "  - 已用流量：从上次重置(或服务首次启动)到现在的累计值"
+echo "  - 占比 = 已用流量 / 配额限额，配额来自脚本顶部的 QUOTA_MAP"
+echo "  - 不限流量的用户(如 user1)占比显示为 ∞"
+echo "  - 重启 caddy 不会清零（自动从JSON恢复历史值）"
+echo "  - 每月自动重置由 Caddyfile 的 traffic_reset_day 控制"
+echo "  - 手动归档+重置: ./proxy_monitor.sh --archive"
 echo "=================================================="

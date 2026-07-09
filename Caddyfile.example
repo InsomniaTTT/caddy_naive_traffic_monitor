@@ -6,9 +6,9 @@
 
 	forward_proxy {
 		basic_auth user1 supersecret1
-		basic_auth user2  supersecret2
-		basic_auth user3  supersecret3
-		basic_auth user4  supersecret4
+		basic_auth user2 supersecret2
+		basic_auth user3 supersecret3
+		basic_auth user4 supersecret4
 		basic_auth user5 supersecret5
 
 		hide_ip
@@ -20,5 +20,25 @@
 
 		# Optional: stats write interval (default: 30s)
 		traffic_stats_interval 30s
+
+		# Optional: per-user traffic quota. Users not listed here have unlimited traffic.
+		# Supports B, KB, MB, GB, TB suffixes (case-insensitive) or plain byte numbers.
+		traffic_quota {
+			user2   50GB
+			user3   20GB
+			user4   100GB
+		}
+		# user1 and user5 are not listed → unlimited traffic
+
+		# Optional: day of month (1-28) to auto-archive and reset traffic stats.
+		# Set this to match your VPS provider's billing cycle reset date.
+		# For example, if your VPS resets traffic on the 15th of each month, set this to 15.
+		# If your reset date is the 29th-31st, use 28 (max value, to avoid months with fewer days).
+		# Default: 0 (disabled — stats accumulate forever, never reset).
+		traffic_reset_day 15
+
+		# Optional: directory for archived snapshots before reset.
+		# Each reset creates a file like traffic_2026-07-15.json in this directory.
+		traffic_archive_dir /var/log/caddy/traffic_archive
 	}
 }

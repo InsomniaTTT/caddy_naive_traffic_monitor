@@ -34,6 +34,15 @@ var trafficStats sync.Map
 // even if multiple Handler instances are provisioned.
 var trafficStatsOnce sync.Once
 
+// lastResetDate records the most recent date (in "2006-01-02" format) on which
+// a scheduled traffic stats reset was performed. It prevents the same reset day
+// from being triggered multiple times within the same 24-hour window.
+// On process restart it is empty, and checkAndPerformScheduledReset initialises
+// it to today — deliberately skipping a reset on the first run so that a
+// restart never accidentally clears historical data.
+var lastResetDate string
+var lastResetDateMu sync.Mutex
+
 // addTrafficForUser atomically adds bytes to the named user's cumulative counter.
 // If username is empty, "unknown" is used as a fallback.
 func addTrafficForUser(username string, bytes int64) {
@@ -67,11 +76,21 @@ func loadTrafficStats(path string) {
 // writes a snapshot of trafficStats to outputPath as JSON.
 // It uses atomic-write (write to .tmp then rename) to avoid readers
 // seeing a half-written file.
-func startTrafficStatsWriter(outputPath string, interval time.Duration) {
+//
+// If resetDay is in [1,28], the goroutine also checks whether today is the
+// configured reset day and, if so, archives the current snapshot to archiveDir
+// before zeroing the in-memory counters.
+func startTrafficStatsWriter(outputPath string, interval time.Duration, resetDay int, archiveDir string) {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for range ticker.C {
+			// Scheduled reset check (before writing, so the snapshot written
+			// this tick is already post-reset).
+			if resetDay > 0 {
+				checkAndPerformScheduledReset(resetDay, archiveDir)
+			}
+
 			snapshot := make(map[string]int64)
 			trafficStats.Range(func(k, v interface{}) bool {
 				snapshot[k.(string)] = atomic.LoadInt64(v.(*int64))
@@ -88,4 +107,65 @@ func startTrafficStatsWriter(outputPath string, interval time.Duration) {
 			_ = os.Rename(tmpPath, outputPath)
 		}
 	}()
+}
+
+// checkAndPerformScheduledReset checks whether today is the configured reset
+// day and, if so, archives the current traffic snapshot and zeros the counters.
+//
+// Safety guarantees:
+//   - On first call (or after a process restart), lastResetDate is empty and is
+//     initialised to today without performing a reset. This ensures a restart
+//     never accidentally zeroes data.
+//   - If today is not the configured reset day, nothing happens.
+//   - If the reset has already been performed today (lastResetDate == today),
+//     nothing happens, preventing duplicate resets within the same day.
+func checkAndPerformScheduledReset(resetDay int, archiveDir string) {
+	now := time.Now()
+	today := now.Format("2006-01-02")
+
+	lastResetDateMu.Lock()
+	defer lastResetDateMu.Unlock()
+
+	// First run after process start: record today as the last reset date
+	// without performing a reset. This prevents a restart from accidentally
+	// clearing accumulated data.
+	if lastResetDate == "" {
+		lastResetDate = today
+		return
+	}
+
+	// Not the configured reset day — nothing to do.
+	if now.Day() != resetDay {
+		return
+	}
+
+	// Already performed a reset today — skip to avoid duplicates.
+	if lastResetDate == today {
+		return
+	}
+
+	// --- Perform archive + reset ---
+
+	// Snapshot current counters.
+	snapshot := make(map[string]int64)
+	trafficStats.Range(func(k, v interface{}) bool {
+		snapshot[k.(string)] = atomic.LoadInt64(v.(*int64))
+		return true
+	})
+
+	// Write archive file.
+	_ = os.MkdirAll(archiveDir, 0755)
+	archivePath := archiveDir + "/traffic_" + today + ".json"
+	data, err := json.MarshalIndent(snapshot, "", "  ")
+	if err == nil {
+		_ = os.WriteFile(archivePath, data, 0644)
+	}
+
+	// Zero in-memory counters.
+	trafficStats.Range(func(k, v interface{}) bool {
+		atomic.StoreInt64(v.(*int64), 0)
+		return true
+	})
+
+	lastResetDate = today
 }

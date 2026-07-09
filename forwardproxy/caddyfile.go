@@ -202,6 +202,41 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 			h.TrafficStatsInterval = caddy.Duration(interval)
 
+		case "traffic_quota":
+			for nesting := d.Nesting(); d.NextBlock(nesting); {
+				username := d.Val()
+				args := d.RemainingArgs()
+				if len(args) != 1 {
+					return d.ArgErr()
+				}
+				quotaBytes, err := parseByteSize(args[0])
+				if err != nil {
+					return d.Errf("invalid traffic_quota value for %s: %v", username, err)
+				}
+				if h.TrafficQuota == nil {
+					h.TrafficQuota = make(map[string]int64)
+				}
+				h.TrafficQuota[username] = quotaBytes
+			}
+
+		case "traffic_reset_day":
+			args := d.RemainingArgs()
+			if len(args) != 1 {
+				return d.ArgErr()
+			}
+			day, err := strconv.Atoi(args[0])
+			if err != nil || day < 0 || day > 28 {
+				return d.Errf("traffic_reset_day must be a number between 0 (disabled) and 28, got: %s", args[0])
+			}
+			h.TrafficResetDay = day
+
+		case "traffic_archive_dir":
+			args := d.RemainingArgs()
+			if len(args) != 1 {
+				return d.ArgErr()
+			}
+			h.TrafficArchiveDir = args[0]
+
 		case "acl":
 			for nesting := d.Nesting(); d.NextBlock(nesting); {
 				aclDirective := d.Val()

@@ -35,6 +35,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -115,6 +116,16 @@ type Handler struct {
 	// Interval between traffic stats writes.
 	// Default: 30s. Caddy Duration format (e.g. "30s", "1m").
 	TrafficStatsInterval caddy.Duration `json:"traffic_stats_interval,omitempty"`
+
+	// Per-user traffic quota in bytes. Key: username, Value: quota (0 or absent = unlimited).
+	TrafficQuota map[string]int64 `json:"traffic_quota,omitempty"`
+
+	// Day of month (1-28) to archive and reset traffic stats. 0 (default) = never reset.
+	// Capped at 28 to avoid ambiguity with months that have fewer than 31 days.
+	TrafficResetDay int `json:"traffic_reset_day,omitempty"`
+
+	// Directory for archived snapshots before reset. Default: <TrafficStatsPath dir>/traffic_archive.
+	TrafficArchiveDir string `json:"traffic_archive_dir,omitempty"`
 }
 
 // CaddyModule returns the Caddy module information.
@@ -259,9 +270,13 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		if interval <= 0 {
 			interval = 30 * time.Second
 		}
-		loadTrafficStats(path)
-		startTrafficStatsWriter(path, interval)
-	})
+		archiveDir := h.TrafficArchiveDir
+			if archiveDir == "" {
+				archiveDir = filepath.Dir(path) + "/traffic_archive"
+			}
+			loadTrafficStats(path)
+			startTrafficStatsWriter(path, interval, h.TrafficResetDay, archiveDir)
+		})
 
 	return nil
 }
@@ -486,6 +501,21 @@ func (h Handler) checkCredentials(r *http.Request) error {
 			username := cred[:strings.IndexByte(cred, ':')]
 			repl.Set("http.auth.user.id", username)
 			*r = *r.WithContext(context.WithValue(r.Context(), contextKeyUsername{}, username))
+
+			// Check per-user traffic quota. If the user has exceeded their quota, reject
+			// the new CONNECT request. Existing in-progress connections are NOT terminated
+			// (known limitation of streaming proxy — quota is only checked at connect time).
+			if h.TrafficQuota != nil {
+				if quota, exists := h.TrafficQuota[username]; exists && quota > 0 {
+					if val, ok := trafficStats.Load(username); ok {
+						used := atomic.LoadInt64(val.(*int64))
+						if used >= quota {
+							return fmt.Errorf("traffic quota exceeded for user %s: used %d bytes, limit %d bytes", username, used, quota)
+						}
+					}
+				}
+			}
+
 			// Please do not consider this to be timing-attack-safe code. Simple equality is almost
 			// mindlessly substituted with constant time algo and there ARE known issues with this code,
 			// e.g. size of smallest credentials is guessable. TODO: protect from all the attacks! Hash?
