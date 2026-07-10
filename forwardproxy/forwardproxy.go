@@ -722,8 +722,9 @@ func dualStream(target net.Conn, clientReader io.ReadCloser, clientWriter io.Wri
 		bufPtr := bufferPool.Get().(*[]byte)
 		buf := *bufPtr
 		buf = buf[0:cap(buf)]
-		written, _err := flushingIoCopy(w, r, buf, paddingType)
-		addTrafficForUser(username, written)
+		_, _err := flushingIoCopy(w, r, buf, paddingType, func(n int64) {
+			addTrafficForUser(username, n)
+		})
 		bufferPool.Put(bufPtr)
 
 		if cw, ok := w.(closeWriter); ok {
@@ -746,7 +747,7 @@ type closeWriter interface {
 // flushingIoCopy is analogous to buffering io.Copy(), but also attempts to flush on each iteration.
 // If dst does not implement http.Flusher(e.g. net.TCPConn), it will do a simple io.CopyBuffer().
 // Reasoning: http2ResponseWriter will not flush on its own, so we have to do it manually.
-func flushingIoCopy(dst io.Writer, src io.Reader, buf []byte, paddingType int) (written int64, err error) {
+func flushingIoCopy(dst io.Writer, src io.Reader, buf []byte, paddingType int, onWrite func(n int64)) (written int64, err error) {
 	rw, ok := dst.(http.ResponseWriter)
 	var rc *http.ResponseController
 	if ok {
@@ -789,6 +790,9 @@ func flushingIoCopy(dst io.Writer, src io.Reader, buf []byte, paddingType int) (
 			nw, ew := dst.Write(buf[0:nr])
 			if nw > 0 {
 				written += int64(nw)
+				if onWrite != nil {
+					onWrite(int64(nw))
+				}
 			}
 			if ew != nil {
 				err = ew
