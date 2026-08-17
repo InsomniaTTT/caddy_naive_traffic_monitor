@@ -271,12 +271,12 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 			interval = 30 * time.Second
 		}
 		archiveDir := h.TrafficArchiveDir
-			if archiveDir == "" {
-				archiveDir = filepath.Dir(path) + "/traffic_archive"
-			}
-			loadTrafficStats(path)
-			startTrafficStatsWriter(path, interval, h.TrafficResetDay, archiveDir)
-		})
+		if archiveDir == "" {
+			archiveDir = filepath.Dir(path) + "/traffic_archive"
+		}
+		loadTrafficStats(path, archiveDir)
+		startTrafficStatsWriter(path, interval, h.TrafficResetDay, archiveDir, h.logger)
+	})
 
 	return nil
 }
